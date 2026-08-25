@@ -10,10 +10,11 @@ int ssPin = 10;
 MFRC522 rfid(ssPin, rstPin);
 
 float deductAmount = 5.00;
+float rechargeAmount = 0.0;
 float startBalance;
 int EEPROM_addr = 0;
-int resetBalance = false;
 String target = "2388101B";
+String admin = "89548047";
 
 // LCD Declarations
 LiquidCrystal_I2C lcd(0x27, 16, 4);
@@ -33,7 +34,13 @@ const byte rowPins[ROWS] = {2, 3, 4, 5};
 const byte columnPins[COLUMNS] = {6, 7, 8, A0};
 Keypad keypad(makeKeymap(keys), rowPins, columnPins, ROWS, COLUMNS);
 
-bool amountEntered = false;
+bool deductAmountEntered = false;
+bool rechargeAmountEntered = false;
+bool rechargeMode = false;
+bool registerMode = false;
+bool registerAdminVerified = false;
+String amountStr = "";
+int digitIndex = 0;
 
 void setup() {
   lcd.init();
@@ -42,71 +49,29 @@ void setup() {
   SPI.begin();
   rfid.PCD_Init();
 
-  Serial.println("Scan Card: ");
-
-  lcd.setCursor(0, 0);
-  lcd.print("Scan Card: ");
-
-  if (resetBalance) {
-    startBalance = 50.00;
-    EEPROM.put(EEPROM_addr, startBalance);
-    Serial.print("Balance: ");
-    Serial.println(startBalance);
-
-    lcd.setCursor(0, 1);
-    lcd.print("Balance: ");
-    lcd.print(startBalance);
-
-    Serial.println("Set to false!");
-  }
 }
 
-void loop() {
-  if (!amountEntered) {
-    String amountStr = "";
-
-    for (int i = 0; i < 4; i++) {
-      bool asking = true;
-      while (asking) {
-        lcd.setCursor(0, 2);
-        lcd.print("Digit");
-        lcd.setCursor(7, 2);
-        lcd.print(i);
-        lcd.setCursor(8, 2);
-        lcd.print(": ");
-
-        char key = keypad.getKey();
-
-        if (key != NO_KEY) {
-          if (key >= '0' && key <= '9') {
-            amountStr += key;
-            lcd.setCursor(9, 2);
-            lcd.print(key);
-            delay(1000);
-            asking = false;
-          } else {
-            Serial.println("Invalid, please enter a number.");
-            lcd.setCursor(0, 3);
-            lcd.print("Enter a number!");
-            delay(1000);
-            clearLine(3);
-          }
-        }
-      }
-      lcd.clear();
+void loop() {  
+  if (registerMode) {
+    if (!registerAdminVerified) {
+      checkRegisterAdmin();
+      return;
     }
-
-    deductAmount = amountStr.toInt() / 100.0;
-
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Amount: $");
-    lcd.print(deductAmount, 2);
-    lcd.setCursor(0, 1);
-    lcd.print("Scan Card:");
-
-    amountEntered = true;
+    checkRegisterNewCard();
+    return;
   }
+
+  if (rechargeMode) {
+    if (!rechargeAmountEntered) {
+      enterRechargeAmount();
+      return;
+    }
+    checkRecharge();
+    return;
+  }
+
+  enterDeductAmount();
+  if (!deductAmountEntered) return; // don't check for a card until an amount is set
 
   if (!rfid.PICC_IsNewCardPresent()) return;
   if (!rfid.PICC_ReadCardSerial()) return;
@@ -143,7 +108,127 @@ void loop() {
   lcd.setCursor(0, 0);
   lcd.print("Scan Card: ");
 
-  amountEntered = false;
+  deductAmountEntered = false;
+  amountStr = "";
+  digitIndex = 0;
+}
+
+void enterRechargeAmount() {
+  if (rechargeAmountEntered) return;
+
+  lcd.setCursor(0, 2);
+  lcd.print("Digit");
+  lcd.setCursor(7, 2);
+  lcd.print(digitIndex);
+  lcd.setCursor(8, 2);
+  lcd.print(": ");
+
+  char key = keypad.getKey();
+  if (key == NO_KEY) return;
+
+  if (key >= '0' && key <= '9') {
+    amountStr += key;
+    lcd.setCursor(9, 2);
+    lcd.print(key);
+    digitIndex++;
+
+    if (digitIndex >= 4) {
+      rechargeAmount = amountStr.toInt() / 100.0;
+
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Recharge: $");
+      lcd.print(rechargeAmount, 2);
+      lcd.setCursor(0, 1);
+      lcd.print("Scan Admin Card:");
+
+      rechargeAmountEntered = true;
+    } else {
+      lcd.clear();
+    }
+  } else if (key == '*') {
+    if (amountStr.length() > 0) {
+      amountStr.remove(amountStr.length() - 1);
+      digitIndex--;
+    }
+    lcd.clear();
+  } else if (key == '#') {
+    rechargeMode = false;
+    rechargeAmountEntered = false;
+    amountStr = "";
+    digitIndex = 0;
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Scan Card: ");
+  } else {
+    Serial.println("Invalid, please enter a number.");
+    lcd.setCursor(0, 3);
+    lcd.print("Enter a number!");
+  }
+}
+
+void enterDeductAmount() {
+  if (deductAmountEntered) return;
+
+  lcd.setCursor(0, 2);
+  lcd.print("Digit");
+  lcd.setCursor(7, 2);
+  lcd.print(digitIndex);
+  lcd.setCursor(8, 2);
+  lcd.print(": ");
+
+  char key = keypad.getKey();
+  if (key == NO_KEY) return;
+
+  if (key >= '0' && key <= '9') {
+    amountStr += key;
+    lcd.setCursor(9, 2);
+    lcd.print(key);
+    digitIndex++;
+
+    if (digitIndex >= 4) {
+      deductAmount = amountStr.toInt() / 100.0;
+
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Amount: $");
+      lcd.print(deductAmount, 2);
+      lcd.setCursor(0, 1);
+      lcd.print("Scan Card:");
+
+      deductAmountEntered = true;
+    } else {
+      lcd.clear();
+    }
+  } else if (key == '*') {
+    if (amountStr.length() > 0) {
+      amountStr.remove(amountStr.length() - 1);
+      digitIndex--;
+    }
+    lcd.clear();
+  } else if (key == 'D') {
+    rechargeMode = true;
+    amountStr = "";
+    digitIndex = 0;
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Enter Recharge $");
+  } else if (key == 'A') {
+    registerMode = true;
+    registerAdminVerified = false;
+    amountStr = "";
+    digitIndex = 0;
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Add Card:");
+    lcd.setCursor(0, 1);
+    lcd.print("Scan Admin Card");
+  } else {
+    Serial.println("Invalid, please enter a number.");
+    lcd.setCursor(0, 3);
+    lcd.print("Enter a number!");
+  }
 }
 
 void clearLine(int row) {
@@ -202,4 +287,139 @@ void processTransaction() {
 
     delay(3000);
   }
+}
+
+void checkRecharge() {
+  char key = keypad.getKey();
+  if (key == '#') {
+    rechargeMode = false;
+    rechargeAmountEntered = false;
+    amountStr = "";
+    digitIndex = 0;
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Scan Card: ");
+    return;
+  }
+
+  if (!rfid.PICC_IsNewCardPresent()) return;
+  if (!rfid.PICC_ReadCardSerial()) return;
+
+  String input = getUIDString(rfid);
+
+  if (input == admin) {
+    float currentBalance = 0.0;
+    EEPROM.get(EEPROM_addr, currentBalance);
+    float newBalance = currentBalance + rechargeAmount;
+    EEPROM.put(EEPROM_addr, newBalance);
+
+    Serial.print("Recharged. New Balance: ");
+    Serial.println(newBalance);
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Recharged!");
+    lcd.setCursor(0, 1);
+    lcd.print("Balance: ");
+    lcd.print(newBalance, 2);
+    delay(3000);
+  } else {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Error: ");
+    lcd.setCursor(0, 1);
+    lcd.print("Not Admin Card");
+
+    Serial.println("Error: Not Admin Card");
+    delay(3000);
+  }
+
+  rechargeMode = false;
+  rechargeAmountEntered = false;
+  amountStr = "";
+  digitIndex = 0;
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Scan Card: ");
+}
+
+void checkRegisterAdmin() {
+  char key = keypad.getKey();
+  if (key == '#') {
+    registerMode = false;
+    registerAdminVerified = false;
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Scan Card: ");
+    return;
+  }
+
+  if (!rfid.PICC_IsNewCardPresent()) return;
+  if (!rfid.PICC_ReadCardSerial()) return;
+
+  String input = getUIDString(rfid);
+
+  if (input == admin) {
+    registerAdminVerified = true;
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Admin Verified");
+    lcd.setCursor(0, 1);
+    lcd.print("Scan New Card");
+  } else {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Error: ");
+    lcd.setCursor(0, 1);
+    lcd.print("Not Admin Card");
+
+    Serial.println("Error: Not Admin Card");
+    delay(3000);
+
+    registerMode = false;
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Scan Card: ");
+  }
+}
+
+void checkRegisterNewCard() {
+  char key = keypad.getKey();
+  if (key == '#') {
+    registerMode = false;
+    registerAdminVerified = false;
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Scan Card: ");
+    return;
+  }
+
+  if (!rfid.PICC_IsNewCardPresent()) return;
+  if (!rfid.PICC_ReadCardSerial()) return;
+
+  String newUID = getUIDString(rfid);
+  target = newUID;
+
+  Serial.print("New target card registered: ");
+  Serial.println(target);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Card Registered!");
+  lcd.setCursor(0, 1);
+  lcd.print(target);
+  delay(3000);
+
+  registerMode = false;
+  registerAdminVerified = false;
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Scan Card: ");
 }
