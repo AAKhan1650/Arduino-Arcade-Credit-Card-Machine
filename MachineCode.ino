@@ -14,7 +14,7 @@ float rechargeAmount = 0.0;
 float startBalance;
 int EEPROM_addr = 0;
 String target = "2388101B";
-String admin = "89548047";
+String admin = "123123";
 
 // LCD Declarations
 LiquidCrystal_I2C lcd(0x27, 16, 4);
@@ -34,9 +34,10 @@ const byte rowPins[ROWS] = {2, 3, 4, 5};
 const byte columnPins[COLUMNS] = {6, 7, 8, A0};
 Keypad keypad(makeKeymap(keys), rowPins, columnPins, ROWS, COLUMNS);
 
+bool deductMode = false;
 bool deductAmountEntered = false;
-bool rechargeAmountEntered = false;
 bool rechargeMode = false;
+bool rechargeAmountEntered = false;
 bool registerMode = false;
 bool registerAdminVerified = false;
 String amountStr = "";
@@ -49,9 +50,18 @@ void setup() {
   SPI.begin();
   rfid.PCD_Init();
 
+  Serial.println("Arduino Credit Card Machine");
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Arduino Credit");
+  lcd.setCursor(0, 1);
+  lcd.print("Card Machine");
+  delay(2000);
+
+  showIdleScreen();
 }
 
-void loop() {  
+void loop() {
   if (registerMode) {
     if (!registerAdminVerified) {
       checkRegisterAdmin();
@@ -70,57 +80,99 @@ void loop() {
     return;
   }
 
+  if (!deductMode) {
+    checkIdleInput();
+    return;
+  }
+
   enterDeductAmount();
   if (!deductAmountEntered) return; // don't check for a card until an amount is set
 
   if (!rfid.PICC_IsNewCardPresent()) return;
   if (!rfid.PICC_ReadCardSerial()) return;
 
-  String uID = getUIDString(rfid);
-  Serial.print("Scanned Card: ");
+  String uID = getUIDString(rfid); // used only for comparison below, never printed
+
+  Serial.println("Card scanned.");
+
   clearLine(1);
   clearLine(2);
   clearLine(3);
   lcd.setCursor(0, 1);
-  lcd.print("Scanned: ");
-
-  Serial.println(uID);
-  lcd.setCursor(0, 2);
-  lcd.print(uID);
+  lcd.print("Card Scanned");
 
   if (uID == target) {
     delay(1500);
     processTransaction();
   } else {
+    Serial.println("Error: Card Mismatch");
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Error: ");
     lcd.setCursor(0, 1);
     lcd.print("Card Mismatch");
-
-    Serial.println("Error: Card Mismatch");
     delay(3000);
   }
 
   Serial.println();
 
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Scan Card: ");
+  rfid.PICC_HaltA();
+  rfid.PCD_StopCrypto1();
 
+  deductMode = false;
   deductAmountEntered = false;
   amountStr = "";
   digitIndex = 0;
+
+  showIdleScreen();
+}
+
+// Base state: waiting for the operator to choose Pay, Recharge, or Add Card
+void checkIdleInput() {
+  char key = keypad.getKey();
+  if (key == NO_KEY) return;
+
+  if (key == 'C') {
+    deductMode = true;
+    amountStr = "";
+    digitIndex = 0;
+
+    Serial.println("Pay Mode: Enter Amount");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Enter Amount:");
+  } else if (key == 'D') {
+    rechargeMode = true;
+    amountStr = "";
+    digitIndex = 0;
+
+    Serial.println("Recharge Mode: Enter Amount");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Enter Recharge $");
+  } else if (key == 'A') {
+    registerMode = true;
+    registerAdminVerified = false;
+
+    Serial.println("Add Card Mode: Scan Admin Card");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Add Card:");
+    lcd.setCursor(0, 1);
+    lcd.print("Scan Admin Card");
+  } else {
+    Serial.println("Invalid key - press C to pay, D to recharge, A to add card");
+    lcd.setCursor(0, 3);
+    lcd.print("Invalid Key!");
+  }
 }
 
 void enterRechargeAmount() {
   if (rechargeAmountEntered) return;
 
   lcd.setCursor(0, 2);
-  lcd.print("Digit");
-  lcd.setCursor(7, 2);
+  lcd.print("Digit ");
   lcd.print(digitIndex);
-  lcd.setCursor(8, 2);
   lcd.print(": ");
 
   char key = keypad.getKey();
@@ -134,6 +186,9 @@ void enterRechargeAmount() {
 
     if (digitIndex >= 4) {
       rechargeAmount = amountStr.toInt() / 100.0;
+
+      Serial.print("Recharge amount entered: $");
+      Serial.println(rechargeAmount, 2);
 
       lcd.clear();
       lcd.setCursor(0, 0);
@@ -153,14 +208,14 @@ void enterRechargeAmount() {
     }
     lcd.clear();
   } else if (key == '#') {
+    Serial.println("Recharge cancelled, returning to idle");
+
     rechargeMode = false;
     rechargeAmountEntered = false;
     amountStr = "";
     digitIndex = 0;
 
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Scan Card: ");
+    showIdleScreen();
   } else {
     Serial.println("Invalid, please enter a number.");
     lcd.setCursor(0, 3);
@@ -172,10 +227,8 @@ void enterDeductAmount() {
   if (deductAmountEntered) return;
 
   lcd.setCursor(0, 2);
-  lcd.print("Digit");
-  lcd.setCursor(7, 2);
+  lcd.print("Digit ");
   lcd.print(digitIndex);
-  lcd.setCursor(8, 2);
   lcd.print(": ");
 
   char key = keypad.getKey();
@@ -189,6 +242,9 @@ void enterDeductAmount() {
 
     if (digitIndex >= 4) {
       deductAmount = amountStr.toInt() / 100.0;
+
+      Serial.print("Amount entered: $");
+      Serial.println(deductAmount, 2);
 
       lcd.clear();
       lcd.setCursor(0, 0);
@@ -207,23 +263,14 @@ void enterDeductAmount() {
       digitIndex--;
     }
     lcd.clear();
-  } else if (key == 'D') {
-    rechargeMode = true;
+  } else if (key == '#') {
+    Serial.println("Payment cancelled, returning to idle");
+
+    deductMode = false;
     amountStr = "";
     digitIndex = 0;
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Enter Recharge $");
-  } else if (key == 'A') {
-    registerMode = true;
-    registerAdminVerified = false;
-    amountStr = "";
-    digitIndex = 0;
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Add Card:");
-    lcd.setCursor(0, 1);
-    lcd.print("Scan Admin Card");
+
+    showIdleScreen();
   } else {
     Serial.println("Invalid, please enter a number.");
     lcd.setCursor(0, 3);
@@ -252,38 +299,37 @@ void processTransaction() {
   EEPROM.get(EEPROM_addr, currentBalance);
 
   Serial.print("Current Balance: $");
-  Serial.print(currentBalance);
+  Serial.println(currentBalance, 2);
 
-  clearLine(1);
   lcd.setCursor(0, 1);
-  lcd.print("Current Balance: ");
+  lcd.print("Old Balance:");
   lcd.setCursor(0, 2);
   lcd.print(currentBalance, 2);
 
   if (currentBalance >= deductAmount) {
     float newBalance = currentBalance - deductAmount;
-    Serial.println("Transaction Successful!");
+    EEPROM.put(EEPROM_addr, newBalance);
+
+    Serial.print("Transaction Successful! New Balance: $");
+    Serial.println(newBalance, 2);
+
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Success!");
-
-    Serial.print("New Balance: ");
-    Serial.println(newBalance);
-
     lcd.setCursor(0, 1);
     lcd.print("New Balance: ");
     lcd.setCursor(0, 2);
     lcd.print(newBalance, 2);
-    EEPROM.put(EEPROM_addr, newBalance);
 
     delay(3000);
   } else {
-    Serial.println("Error: Insufficient Funds");
+    Serial.println("Error: Not Enough Funds");
+
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Error: ");
     lcd.setCursor(0, 1);
-    lcd.print("Insufficient Funds");
+    lcd.print("Not Enough Funds");
 
     delay(3000);
   }
@@ -292,14 +338,14 @@ void processTransaction() {
 void checkRecharge() {
   char key = keypad.getKey();
   if (key == '#') {
+    Serial.println("Recharge cancelled, returning to idle");
+
     rechargeMode = false;
     rechargeAmountEntered = false;
     amountStr = "";
     digitIndex = 0;
 
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Scan Card: ");
+    showIdleScreen();
     return;
   }
 
@@ -314,8 +360,8 @@ void checkRecharge() {
     float newBalance = currentBalance + rechargeAmount;
     EEPROM.put(EEPROM_addr, newBalance);
 
-    Serial.print("Recharged. New Balance: ");
-    Serial.println(newBalance);
+    Serial.print("Recharged. New Balance: $");
+    Serial.println(newBalance, 2);
 
     lcd.clear();
     lcd.setCursor(0, 0);
@@ -323,37 +369,40 @@ void checkRecharge() {
     lcd.setCursor(0, 1);
     lcd.print("Balance: ");
     lcd.print(newBalance, 2);
+
     delay(3000);
   } else {
+    Serial.println("Error: Not Admin Card");
+
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Error: ");
     lcd.setCursor(0, 1);
     lcd.print("Not Admin Card");
 
-    Serial.println("Error: Not Admin Card");
     delay(3000);
   }
+
+  rfid.PICC_HaltA();
+  rfid.PCD_StopCrypto1();
 
   rechargeMode = false;
   rechargeAmountEntered = false;
   amountStr = "";
   digitIndex = 0;
 
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Scan Card: ");
+  showIdleScreen();
 }
 
 void checkRegisterAdmin() {
   char key = keypad.getKey();
   if (key == '#') {
+    Serial.println("Add Card cancelled, returning to idle");
+
     registerMode = false;
     registerAdminVerified = false;
 
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Scan Card: ");
+    showIdleScreen();
     return;
   }
 
@@ -365,38 +414,42 @@ void checkRegisterAdmin() {
   if (input == admin) {
     registerAdminVerified = true;
 
+    Serial.println("Admin Verified. Remove admin card, then scan new card");
+
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Admin Verified");
     lcd.setCursor(0, 1);
-    lcd.print("Scan New Card");
+    lcd.print("Remove, scan new");
   } else {
+    Serial.println("Error: Not Admin Card");
+
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Error: ");
     lcd.setCursor(0, 1);
     lcd.print("Not Admin Card");
 
-    Serial.println("Error: Not Admin Card");
     delay(3000);
 
     registerMode = false;
 
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Scan Card: ");
+    showIdleScreen();
   }
+
+  rfid.PICC_HaltA();
+  rfid.PCD_StopCrypto1();
 }
 
 void checkRegisterNewCard() {
   char key = keypad.getKey();
   if (key == '#') {
+    Serial.println("Add Card cancelled, returning to idle");
+
     registerMode = false;
     registerAdminVerified = false;
 
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Scan Card: ");
+    showIdleScreen();
     return;
   }
 
@@ -404,6 +457,21 @@ void checkRegisterNewCard() {
   if (!rfid.PICC_ReadCardSerial()) return;
 
   String newUID = getUIDString(rfid);
+
+  // Guard against the admin card still lingering on the reader
+  if (newUID == admin) {
+    Serial.println("Error: Admin card still present - remove it and tap new card");
+
+    lcd.setCursor(0, 2);
+    lcd.print("Remove admin");
+    lcd.setCursor(0, 3);
+    lcd.print("card first!");
+
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+    return;
+  }
+
   target = newUID;
 
   Serial.print("New target card registered: ");
@@ -414,12 +482,25 @@ void checkRegisterNewCard() {
   lcd.print("Card Registered!");
   lcd.setCursor(0, 1);
   lcd.print(target);
+
   delay(3000);
+
+  rfid.PICC_HaltA();
+  rfid.PCD_StopCrypto1();
 
   registerMode = false;
   registerAdminVerified = false;
 
+  showIdleScreen();
+}
+
+// Shared idle screen shown whenever the terminal is waiting on the operator
+void showIdleScreen() {
+  Serial.println("Ready. C: Pay  D: Recharge  A: Add Card");
+
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("Scan Card: ");
+  lcd.print("C:Pay D:Recharge");
+  lcd.setCursor(0, 1);
+  lcd.print("A:Add Card");
 }
