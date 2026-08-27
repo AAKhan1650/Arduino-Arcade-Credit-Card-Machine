@@ -7,16 +7,16 @@
 // Hardware Pin Declarations
 int rstPin = 9;
 int ssPin = 10;
-const int BUZZER_PIN = 6; // Connect piezo buzzer to Pin 6 and GND
+const int BUZZER_PIN = A3;
 
 MFRC522 rfid(ssPin, rstPin);
 
 float deductAmount;
 float rechargeAmount;
-String admin = "89548047";
+String admin = "89548047"; // Master card UID
 
-// Four independent users, each with their own UID and balance
-String userOneUID = "2388101B";
+// Four independent users, each initialized with empty UIDs
+String userOneUID = "";
 String userTwoUID = "";
 String userThreeUID = "";
 String userFourUID = "";
@@ -26,7 +26,7 @@ float userTwoBalance = 0.0;
 float userThreeBalance = 0.0;
 float userFourBalance = 0.0;
 
-// EEPROM addresses
+// EEPROM addresses (4 bytes per float, 20 bytes for UIDs)
 const int BAL1_ADDR = 0;
 const int BAL2_ADDR = 4;
 const int BAL3_ADDR = 8;
@@ -52,7 +52,7 @@ char keys[ROWS][COLUMNS] = {
 };
 
 const byte rowPins[ROWS] = {2, 3, 4, 5};
-const byte columnPins[COLUMNS] = {7, 8, A0, A1}; // Shifted column pins to free Pin 6
+const byte columnPins[COLUMNS] = {6, 7, 8, A0}; 
 Keypad keypad(makeKeymap(keys), rowPins, columnPins, ROWS, COLUMNS);
 
 // Mode flags
@@ -69,6 +69,10 @@ bool registerMode = false;
 bool registerAdminVerified = false;
 int registerSlot = 0;
 bool registerMenuShown = false;
+
+bool balanceMode = false;
+bool balanceAdminVerified = false;
+bool balanceMenuShown = false;
 
 // Amount entry buffer
 long amountBufferCents = 0;
@@ -87,24 +91,27 @@ void playSuccessSound() {
 }
 
 void playErrorSound() {
-  tone(BUZZER_PIN, 200, 1200); // Low "aehhhhh" tone
+  tone(BUZZER_PIN, 200, 1200);
   delay(1200);
 }
 
+// Clears a single line on the LCD instead of wiping the whole screen
 void clearLine(int row) {
   lcd.setCursor(0, row);
   lcd.print(F("                "));
 }
 
 void showIdleScreen() {
-  Serial.println(F("Ready. A: Add Card  C: Pay  D: Recharge"));
+  Serial.println(F("Ready. A: Add Card  B: Balance  C: Pay  D: Recharge"));
 
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print(F("A:Add Card"));
   lcd.setCursor(0, 1);
-  lcd.print(F("C:Pay"));
+  lcd.print(F("B:Check Balance"));
   lcd.setCursor(0, 2);
+  lcd.print(F("C:Pay"));
+  lcd.setCursor(0, 3);
   lcd.print(F("D:Recharge"));
 }
 
@@ -112,6 +119,7 @@ void resetActivityTimer() {
   lastActivityTime = millis();
 }
 
+// Clears all mode flags and input buffers
 void resetAllStates() {
   deductMode = false;
   deductAmountEntered = false;
@@ -127,12 +135,17 @@ void resetAllStates() {
   registerSlot = 0;
   registerMenuShown = false;
 
+  balanceMode = false;
+  balanceAdminVerified = false;
+  balanceMenuShown = false;
+
   amountBufferCents = 0;
   digitIndex = 0;
 }
 
+// Drops back to the home screen if left idle for too long
 void checkAutoTimeout() {
-  if (deductMode || rechargeMode || registerMode) {
+  if (deductMode || rechargeMode || registerMode || balanceMode) {
     if (millis() - lastActivityTime >= TIMEOUT_DELAY) {
       Serial.println(F("Inactivity timeout - returning to idle."));
 
@@ -147,6 +160,7 @@ void checkAutoTimeout() {
   }
 }
 
+// Write string char by char into EEPROM with null termination
 void saveUIDToEEPROM(int addr, String uid) {
   int len = uid.length();
   if (len > UID_MAX_LEN - 1) len = UID_MAX_LEN - 1;
@@ -172,6 +186,29 @@ String loadUIDFromEEPROM(int addr) {
 }
 
 void setUserUID(int user, String uid) {
+  // If UID already exists in another slot, clear it from RAM and EEPROM
+  if (userOneUID == uid && user != 1) {
+    userOneUID = "";
+    saveUIDToEEPROM(UID1_ADDR, "");
+    Serial.println(F("Cleared duplicate UID from User 1"));
+  }
+  if (userTwoUID == uid && user != 2) {
+    userTwoUID = "";
+    saveUIDToEEPROM(UID2_ADDR, "");
+    Serial.println(F("Cleared duplicate UID from User 2"));
+  }
+  if (userThreeUID == uid && user != 3) {
+    userThreeUID = "";
+    saveUIDToEEPROM(UID3_ADDR, "");
+    Serial.println(F("Cleared duplicate UID from User 3"));
+  }
+  if (userFourUID == uid && user != 4) {
+    userFourUID = "";
+    saveUIDToEEPROM(UID4_ADDR, "");
+    Serial.println(F("Cleared duplicate UID from User 4"));
+  }
+
+  // Assign to target user slot
   if (user == 1) {
     userOneUID = uid;
     saveUIDToEEPROM(UID1_ADDR, uid);
@@ -181,10 +218,18 @@ void setUserUID(int user, String uid) {
   } else if (user == 3) {
     userThreeUID = uid;
     saveUIDToEEPROM(UID3_ADDR, uid);
-  } else {
+  } else if (user == 4) {
     userFourUID = uid;
     saveUIDToEEPROM(UID4_ADDR, uid);
   }
+}
+
+// Returns true if no card has been registered to this slot
+bool userSlotIsEmpty(int user) {
+  if (user == 1) return userOneUID.length() == 0;
+  if (user == 2) return userTwoUID.length() == 0;
+  if (user == 3) return userThreeUID.length() == 0;
+  return userFourUID.length() == 0;
 }
 
 float getUserBalance(int user) {
@@ -210,6 +255,7 @@ void setUserBalance(int user, float value) {
   }
 }
 
+// Pull saved balances and card UIDs on startup
 void loadAllFromEEPROM() {
   float b1, b2, b3, b4;
   EEPROM.get(BAL1_ADDR, b1);
@@ -217,6 +263,7 @@ void loadAllFromEEPROM() {
   EEPROM.get(BAL3_ADDR, b3);
   EEPROM.get(BAL4_ADDR, b4);
 
+  // Fallback to 0 if memory was uninitialized
   if (isnan(b1)) userOneBalance = 0.00;
   else userOneBalance = b1;
 
@@ -242,6 +289,7 @@ void loadAllFromEEPROM() {
   Serial.println(F("Loaded saved users and balances from EEPROM."));
 }
 
+// Helper to convert RFID byte array into a formatted hex string
 String getUIDString(MFRC522 &reader) {
   String uid = "";
   for (int i = 0; i < reader.uid.size; i++) {
@@ -252,6 +300,7 @@ String getUIDString(MFRC522 &reader) {
   return uid;
 }
 
+// Make sure admin card is scanned before letting anyone register a card
 void checkRegisterAdmin() {
   char key = keypad.getKey();
   if (key != NO_KEY) resetActivityTimer();
@@ -359,6 +408,7 @@ void checkRegisterNewCard() {
   resetActivityTimer();
   String newUID = getUIDString(rfid);
 
+  // Prevent accidentally assigning admin card as a regular user card
   if (newUID == admin) {
     Serial.println(F("Error: Admin card still present - remove it and tap new card"));
 
@@ -398,6 +448,7 @@ void checkRegisterNewCard() {
   showIdleScreen();
 }
 
+// Build 4-digit dollar amount from keypad numbers
 void enterRechargeAmount() {
   if (rechargeAmountEntered) return;
 
@@ -436,6 +487,7 @@ void enterRechargeAmount() {
       lcd.clear();
     }
   } else if (key == '*') {
+    // Backspace digit
     if (digitIndex > 0) {
       amountBufferCents = amountBufferCents / 10;
       digitIndex--;
@@ -561,6 +613,117 @@ void applyRecharge() {
   showIdleScreen();
 }
 
+void checkBalanceAdmin() {
+  char key = keypad.getKey();
+  if (key != NO_KEY) resetActivityTimer();
+
+  if (key == '#') {
+    Serial.println(F("Balance check cancelled, returning to idle"));
+    resetAllStates();
+    showIdleScreen();
+    return;
+  }
+
+  if (!rfid.PICC_IsNewCardPresent()) return;
+  if (!rfid.PICC_ReadCardSerial()) return;
+
+  resetActivityTimer();
+  String input = getUIDString(rfid);
+
+  if (input == admin) {
+    balanceAdminVerified = true;
+    playSuccessSound();
+
+    Serial.println(F("Admin Verified. Select user to check."));
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("Admin Verified"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Select User"));
+  } else {
+    Serial.println(F("Error: Not Admin Card"));
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("Error: "));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Not Admin Card"));
+
+    playErrorSound();
+    resetAllStates();
+    showIdleScreen();
+  }
+
+  rfid.PICC_HaltA();
+  rfid.PCD_StopCrypto1();
+}
+
+void selectBalanceSlot() {
+  if (!balanceMenuShown) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("1: User 1"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("2: User 2"));
+    lcd.setCursor(0, 2);
+    lcd.print(F("3: User 3"));
+    lcd.setCursor(0, 3);
+    lcd.print(F("4: User 4"));
+    balanceMenuShown = true;
+  }
+
+  char key = keypad.getKey();
+  if (key == NO_KEY) return;
+  resetActivityTimer();
+
+  if (key == '#') {
+    Serial.println(F("Balance check cancelled, returning to idle"));
+    resetAllStates();
+    showIdleScreen();
+    return;
+  }
+
+  if (key < '1' || key > '4') {
+    Serial.println(F("Invalid, choose 1-4"));
+    playErrorSound();
+    return;
+  }
+
+  int slot = key - '0';
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("User "));
+  lcd.print(slot);
+
+  if (userSlotIsEmpty(slot)) {
+    Serial.print(F("User "));
+    Serial.print(slot);
+    Serial.println(F(": No User!"));
+
+    lcd.setCursor(0, 1);
+    lcd.print(F("No User!"));
+  } else {
+    float balance = getUserBalance(slot);
+
+    Serial.print(F("User "));
+    Serial.print(slot);
+    Serial.print(F(" Balance: $"));
+    Serial.println(balance, 2);
+
+    lcd.setCursor(0, 1);
+    lcd.print(F("Balance: $"));
+    lcd.print(balance, 2);
+  }
+
+  delay(2000);
+
+  resetAllStates();
+  showIdleScreen();
+}
+
+// Watch for main menu choices on the keypad (A, B, C, D)
 void checkIdleInput() {
   char key = keypad.getKey();
   if (key == NO_KEY) return;
@@ -596,8 +759,19 @@ void checkIdleInput() {
     lcd.print(F("Add Card:"));
     lcd.setCursor(0, 1);
     lcd.print(F("Scan Admin Card"));
+  } else if (key == 'B') {
+    balanceMode = true;
+    balanceAdminVerified = false;
+    balanceMenuShown = false;
+
+    Serial.println(F("Balance Mode: Scan Admin Card"));
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("Check Balance:"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Scan Admin Card"));
   } else {
-    Serial.println(F("Invalid key - press C to pay, D to recharge, A to add card"));
+    Serial.println(F("Invalid key - press C to pay, D to recharge, A to add card, B for balance"));
     lcd.setCursor(0, 3);
     lcd.print(F("Invalid Key!"));
     playErrorSound();
@@ -660,6 +834,7 @@ void enterDeductAmount() {
   }
 }
 
+// Deduct funds if balance allows, update EEPROM, play sound feedback
 void processTransaction(int user) {
   lcd.clear();
   float currentBalance = getUserBalance(user);
@@ -728,6 +903,7 @@ void setup() {
 void loop() {
   checkAutoTimeout();
 
+  // State machine handlers
   if (registerMode) {
     if (!registerAdminVerified) {
       checkRegisterAdmin();
@@ -758,6 +934,15 @@ void loop() {
     return;
   }
 
+  if (balanceMode) {
+    if (!balanceAdminVerified) {
+      checkBalanceAdmin();
+      return;
+    }
+    selectBalanceSlot();
+    return;
+  }
+
   if (!deductMode) {
     checkIdleInput();
     return;
@@ -765,6 +950,16 @@ void loop() {
 
   enterDeductAmount();
   if (!deductAmountEntered) return;
+
+  // Allow cancelling out while waiting for the payment card to be tapped
+  char cancelKey = keypad.getKey();
+  if (cancelKey == '#') {
+    resetActivityTimer();
+    Serial.println(F("Payment cancelled, returning to idle"));
+    resetAllStates();
+    showIdleScreen();
+    return;
+  }
 
   if (!rfid.PICC_IsNewCardPresent()) return;
   if (!rfid.PICC_ReadCardSerial()) return;
@@ -780,6 +975,7 @@ void loop() {
   lcd.setCursor(0, 1);
   lcd.print(F("Card Scanned"));
 
+  // Check scanned card against all registered slots
   int matchedUser = 0;
   if (userOneUID.length() > 0 && uID == userOneUID) matchedUser = 1;
   else if (userTwoUID.length() > 0 && uID == userTwoUID) matchedUser = 2;
