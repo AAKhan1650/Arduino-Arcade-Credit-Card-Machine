@@ -4,9 +4,11 @@
 #include <LiquidCrystal_I2C.h>
 #include <Keypad.h>
 
-// RFID Declarations
+// Hardware Pin Declarations
 int rstPin = 9;
 int ssPin = 10;
+const int BUZZER_PIN = 6; // Connect piezo buzzer to Pin 6 and GND
+
 MFRC522 rfid(ssPin, rstPin);
 
 float deductAmount;
@@ -24,7 +26,7 @@ float userTwoBalance = 0.0;
 float userThreeBalance = 0.0;
 float userFourBalance = 0.0;
 
-// EEPROM addresses: 4 balances, then 4 UIDs, spaced out so they never overlap
+// EEPROM addresses
 const int BAL1_ADDR = 0;
 const int BAL2_ADDR = 4;
 const int BAL3_ADDR = 8;
@@ -50,27 +52,44 @@ char keys[ROWS][COLUMNS] = {
 };
 
 const byte rowPins[ROWS] = {2, 3, 4, 5};
-const byte columnPins[COLUMNS] = {6, 7, 8, A0};
+const byte columnPins[COLUMNS] = {7, 8, A0, A1}; // Shifted column pins to free Pin 6
 Keypad keypad(makeKeymap(keys), rowPins, columnPins, ROWS, COLUMNS);
 
-// Mode flags track which "screen" the terminal is currently on
+// Mode flags
 bool deductMode = false;
 bool deductAmountEntered = false;
 
 bool rechargeMode = false;
 bool rechargeAmountEntered = false;
 bool rechargeAdminVerified = false;
-int rechargeSlot = 0; // which user (1-4) is being recharged, 0 = not chosen yet
-bool rechargeMenuShown = false; // only draw the user-select menu once
+int rechargeSlot = 0;
+bool rechargeMenuShown = false;
 
 bool registerMode = false;
 bool registerAdminVerified = false;
-int registerSlot = 0; // which user slot (1-4) is being registered, 0 = not chosen yet
-bool registerMenuShown = false; // only draw the user-select menu once
+int registerSlot = 0;
+bool registerMenuShown = false;
 
-// Amount entry is now a plain number, not a String, to avoid memory fragmentation
+// Amount entry buffer
 long amountBufferCents = 0;
 int digitIndex = 0;
+
+// Timeout Variables (15 Seconds)
+unsigned long lastActivityTime = 0;
+const unsigned long TIMEOUT_DELAY = 15000;
+
+// --- Sound Functions ---
+void playSuccessSound() {
+  tone(BUZZER_PIN, 1800, 100);
+  delay(130);
+  tone(BUZZER_PIN, 2200, 150);
+  delay(180);
+}
+
+void playErrorSound() {
+  tone(BUZZER_PIN, 200, 1200); // Low "aehhhhh" tone
+  delay(1200);
+}
 
 void clearLine(int row) {
   lcd.setCursor(0, row);
@@ -87,6 +106,45 @@ void showIdleScreen() {
   lcd.print(F("C:Pay"));
   lcd.setCursor(0, 2);
   lcd.print(F("D:Recharge"));
+}
+
+void resetActivityTimer() {
+  lastActivityTime = millis();
+}
+
+void resetAllStates() {
+  deductMode = false;
+  deductAmountEntered = false;
+
+  rechargeMode = false;
+  rechargeAmountEntered = false;
+  rechargeAdminVerified = false;
+  rechargeSlot = 0;
+  rechargeMenuShown = false;
+
+  registerMode = false;
+  registerAdminVerified = false;
+  registerSlot = 0;
+  registerMenuShown = false;
+
+  amountBufferCents = 0;
+  digitIndex = 0;
+}
+
+void checkAutoTimeout() {
+  if (deductMode || rechargeMode || registerMode) {
+    if (millis() - lastActivityTime >= TIMEOUT_DELAY) {
+      Serial.println(F("Inactivity timeout - returning to idle."));
+
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(F("Timed Out!"));
+      playErrorSound();
+
+      resetAllStates();
+      showIdleScreen();
+    }
+  }
 }
 
 void saveUIDToEEPROM(int addr, String uid) {
@@ -159,29 +217,17 @@ void loadAllFromEEPROM() {
   EEPROM.get(BAL3_ADDR, b3);
   EEPROM.get(BAL4_ADDR, b4);
 
-  if (isnan(b1)) {
-    userOneBalance = 0.00;
-  } else {
-    userOneBalance = b1;
-  }
+  if (isnan(b1)) userOneBalance = 0.00;
+  else userOneBalance = b1;
 
-  if (isnan(b2)) {
-    userTwoBalance = 0.00;
-  } else {
-    userTwoBalance = b2;
-  }
+  if (isnan(b2)) userTwoBalance = 0.00;
+  else userTwoBalance = b2;
 
-  if (isnan(b3)) {
-    userThreeBalance = 0.00;
-  } else {
-    userThreeBalance = b3;
-  }
+  if (isnan(b3)) userThreeBalance = 0.00;
+  else userThreeBalance = b3;
 
-  if (isnan(b4)) {
-    userFourBalance = 0.00;
-  } else {
-    userFourBalance = b4;
-  }
+  if (isnan(b4)) userFourBalance = 0.00;
+  else userFourBalance = b4;
 
   String u1 = loadUIDFromEEPROM(UID1_ADDR);
   String u2 = loadUIDFromEEPROM(UID2_ADDR);
@@ -196,23 +242,6 @@ void loadAllFromEEPROM() {
   Serial.println(F("Loaded saved users and balances from EEPROM."));
 }
 
-void resetRechargeState() {
-  rechargeMode = false;
-  rechargeAmountEntered = false;
-  rechargeAdminVerified = false;
-  rechargeSlot = 0;
-  rechargeMenuShown = false;
-  amountBufferCents = 0;
-  digitIndex = 0;
-}
-
-void resetRegisterState() {
-  registerMode = false;
-  registerAdminVerified = false;
-  registerSlot = 0;
-  registerMenuShown = false;
-}
-
 String getUIDString(MFRC522 &reader) {
   String uid = "";
   for (int i = 0; i < reader.uid.size; i++) {
@@ -225,9 +254,11 @@ String getUIDString(MFRC522 &reader) {
 
 void checkRegisterAdmin() {
   char key = keypad.getKey();
+  if (key != NO_KEY) resetActivityTimer();
+
   if (key == '#') {
     Serial.println(F("Add Card cancelled, returning to idle"));
-    resetRegisterState();
+    resetAllStates();
     showIdleScreen();
     return;
   }
@@ -235,10 +266,12 @@ void checkRegisterAdmin() {
   if (!rfid.PICC_IsNewCardPresent()) return;
   if (!rfid.PICC_ReadCardSerial()) return;
 
+  resetActivityTimer();
   String input = getUIDString(rfid);
 
   if (input == admin) {
     registerAdminVerified = true;
+    playSuccessSound();
 
     Serial.println(F("Admin Verified. Select slot for new card."));
 
@@ -256,8 +289,8 @@ void checkRegisterAdmin() {
     lcd.setCursor(0, 1);
     lcd.print(F("Not Admin Card"));
 
-    delay(3000);
-    resetRegisterState();
+    playErrorSound();
+    resetAllStates();
     showIdleScreen();
   }
 
@@ -281,16 +314,18 @@ void selectRegisterSlot() {
 
   char key = keypad.getKey();
   if (key == NO_KEY) return;
+  resetActivityTimer();
 
   if (key == '#') {
     Serial.println(F("Add Card cancelled, returning to idle"));
-    resetRegisterState();
+    resetAllStates();
     showIdleScreen();
     return;
   }
 
   if (key < '1' || key > '4') {
     Serial.println(F("Invalid, choose 1-4"));
+    playErrorSound();
     return;
   }
 
@@ -309,9 +344,11 @@ void selectRegisterSlot() {
 
 void checkRegisterNewCard() {
   char key = keypad.getKey();
+  if (key != NO_KEY) resetActivityTimer();
+
   if (key == '#') {
     Serial.println(F("Add Card cancelled, returning to idle"));
-    resetRegisterState();
+    resetAllStates();
     showIdleScreen();
     return;
   }
@@ -319,6 +356,7 @@ void checkRegisterNewCard() {
   if (!rfid.PICC_IsNewCardPresent()) return;
   if (!rfid.PICC_ReadCardSerial()) return;
 
+  resetActivityTimer();
   String newUID = getUIDString(rfid);
 
   if (newUID == admin) {
@@ -328,6 +366,8 @@ void checkRegisterNewCard() {
     lcd.print(F("Remove admin"));
     lcd.setCursor(0, 3);
     lcd.print(F("card first!"));
+
+    playErrorSound();
 
     rfid.PICC_HaltA();
     rfid.PCD_StopCrypto1();
@@ -348,30 +388,34 @@ void checkRegisterNewCard() {
   lcd.setCursor(0, 1);
   lcd.print(newUID);
 
-  delay(3000);
+  playSuccessSound();
+  delay(1500);
 
   rfid.PICC_HaltA();
   rfid.PCD_StopCrypto1();
 
-  resetRegisterState();
+  resetAllStates();
   showIdleScreen();
 }
 
 void enterRechargeAmount() {
   if (rechargeAmountEntered) return;
 
-  lcd.setCursor(0, 2);
+  lcd.setCursor(0, 0);
   lcd.print(F("Digit "));
   lcd.print(digitIndex);
-  lcd.print(F(": "));
+  lcd.print(F(": $"));
 
   char key = keypad.getKey();
   if (key == NO_KEY) return;
+  resetActivityTimer();
 
   if (key >= '0' && key <= '9') {
-    amountBufferCents = amountBufferCents * 10 + (key - '0');
-    lcd.setCursor(9, 2);
+    lcd.setCursor(10, 0);
     lcd.print(key);
+    delay(300);
+
+    amountBufferCents = amountBufferCents * 10 + (key - '0');
     digitIndex++;
 
     if (digitIndex >= 4) {
@@ -399,20 +443,23 @@ void enterRechargeAmount() {
     lcd.clear();
   } else if (key == '#') {
     Serial.println(F("Recharge cancelled, returning to idle"));
-    resetRechargeState();
+    resetAllStates();
     showIdleScreen();
   } else {
     Serial.println(F("Invalid, please enter a number."));
     lcd.setCursor(0, 3);
     lcd.print(F("Enter a number!"));
+    playErrorSound();
   }
 }
 
 void checkRechargeAdmin() {
   char key = keypad.getKey();
+  if (key != NO_KEY) resetActivityTimer();
+
   if (key == '#') {
     Serial.println(F("Recharge cancelled, returning to idle"));
-    resetRechargeState();
+    resetAllStates();
     showIdleScreen();
     return;
   }
@@ -420,10 +467,12 @@ void checkRechargeAdmin() {
   if (!rfid.PICC_IsNewCardPresent()) return;
   if (!rfid.PICC_ReadCardSerial()) return;
 
+  resetActivityTimer();
   String input = getUIDString(rfid);
 
   if (input == admin) {
     rechargeAdminVerified = true;
+    playSuccessSound();
 
     Serial.println(F("Admin Verified. Select user to recharge."));
 
@@ -441,8 +490,8 @@ void checkRechargeAdmin() {
     lcd.setCursor(0, 1);
     lcd.print(F("Not Admin Card"));
 
-    delay(3000);
-    resetRechargeState();
+    playErrorSound();
+    resetAllStates();
     showIdleScreen();
   }
 
@@ -466,16 +515,18 @@ void selectRechargeSlot() {
 
   char key = keypad.getKey();
   if (key == NO_KEY) return;
+  resetActivityTimer();
 
   if (key == '#') {
     Serial.println(F("Recharge cancelled, returning to idle"));
-    resetRechargeState();
+    resetAllStates();
     showIdleScreen();
     return;
   }
 
   if (key < '1' || key > '4') {
     Serial.println(F("Invalid, choose 1-4"));
+    playErrorSound();
     return;
   }
 
@@ -500,18 +551,20 @@ void applyRecharge() {
   lcd.print(F("Recharged User "));
   lcd.print(rechargeSlot);
   lcd.setCursor(0, 1);
-  lcd.print(F("Balance: "));
+  lcd.print(F("Bal: $"));
   lcd.print(newBalance, 2);
 
-  delay(3000);
+  playSuccessSound();
+  delay(1500);
 
-  resetRechargeState();
+  resetAllStates();
   showIdleScreen();
 }
 
 void checkIdleInput() {
   char key = keypad.getKey();
   if (key == NO_KEY) return;
+  resetActivityTimer();
 
   if (key == 'C') {
     deductMode = true;
@@ -520,8 +573,6 @@ void checkIdleInput() {
 
     Serial.println(F("Pay Mode: Enter Amount"));
     lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print(F("Enter Amount:"));
   } else if (key == 'D') {
     rechargeMode = true;
     rechargeAmountEntered = false;
@@ -533,8 +584,6 @@ void checkIdleInput() {
 
     Serial.println(F("Recharge Mode: Enter Amount"));
     lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print(F("Enter Recharge $"));
   } else if (key == 'A') {
     registerMode = true;
     registerAdminVerified = false;
@@ -551,24 +600,28 @@ void checkIdleInput() {
     Serial.println(F("Invalid key - press C to pay, D to recharge, A to add card"));
     lcd.setCursor(0, 3);
     lcd.print(F("Invalid Key!"));
+    playErrorSound();
   }
 }
 
 void enterDeductAmount() {
   if (deductAmountEntered) return;
 
-  lcd.setCursor(0, 2);
+  lcd.setCursor(0, 0);
   lcd.print(F("Digit "));
   lcd.print(digitIndex);
-  lcd.print(F(": "));
+  lcd.print(F(": $"));
 
   char key = keypad.getKey();
   if (key == NO_KEY) return;
+  resetActivityTimer();
 
   if (key >= '0' && key <= '9') {
-    amountBufferCents = amountBufferCents * 10 + (key - '0');
-    lcd.setCursor(9, 2);
+    lcd.setCursor(10, 0);
     lcd.print(key);
+    delay(300);
+
+    amountBufferCents = amountBufferCents * 10 + (key - '0');
     digitIndex++;
 
     if (digitIndex >= 4) {
@@ -597,15 +650,13 @@ void enterDeductAmount() {
   } else if (key == '#') {
     Serial.println(F("Payment cancelled, returning to idle"));
 
-    deductMode = false;
-    amountBufferCents = 0;
-    digitIndex = 0;
-
+    resetAllStates();
     showIdleScreen();
   } else {
     Serial.println(F("Invalid, please enter a number."));
     lcd.setCursor(0, 3);
     lcd.print(F("Enter a number!"));
+    playErrorSound();
   }
 }
 
@@ -619,8 +670,7 @@ void processTransaction(int user) {
   Serial.println(currentBalance, 2);
 
   lcd.setCursor(0, 1);
-  lcd.print(F("Old Balance:"));
-  lcd.setCursor(0, 2);
+  lcd.print(F("Old Bal: $"));
   lcd.print(currentBalance, 2);
 
   if (currentBalance >= deductAmount) {
@@ -635,11 +685,11 @@ void processTransaction(int user) {
     lcd.print(F("Success! User "));
     lcd.print(user);
     lcd.setCursor(0, 1);
-    lcd.print(F("New Balance: "));
-    lcd.setCursor(0, 2);
+    lcd.print(F("New Bal: $"));
     lcd.print(newBalance, 2);
 
-    delay(3000);
+    playSuccessSound();
+    delay(1500);
   } else {
     Serial.println(F("Error: Not Enough Funds"));
 
@@ -649,11 +699,12 @@ void processTransaction(int user) {
     lcd.setCursor(0, 1);
     lcd.print(F("Not Enough Funds"));
 
-    delay(3000);
+    playErrorSound();
   }
 }
 
 void setup() {
+  pinMode(BUZZER_PIN, OUTPUT);
   lcd.init();
   lcd.backlight();
   Serial.begin(9600);
@@ -666,13 +717,17 @@ void setup() {
   lcd.print(F("Arduino Credit"));
   lcd.setCursor(0, 1);
   lcd.print(F("Card Machine"));
-  delay(2000);
+
+  playSuccessSound();
+  delay(1500);
 
   loadAllFromEEPROM();
   showIdleScreen();
 }
 
 void loop() {
+  checkAutoTimeout();
+
   if (registerMode) {
     if (!registerAdminVerified) {
       checkRegisterAdmin();
@@ -714,6 +769,7 @@ void loop() {
   if (!rfid.PICC_IsNewCardPresent()) return;
   if (!rfid.PICC_ReadCardSerial()) return;
 
+  resetActivityTimer();
   String uID = getUIDString(rfid);
 
   Serial.println(F("Card scanned."));
@@ -724,7 +780,6 @@ void loop() {
   lcd.setCursor(0, 1);
   lcd.print(F("Card Scanned"));
 
-  // Figure out which registered user this card belongs to, if any
   int matchedUser = 0;
   if (userOneUID.length() > 0 && uID == userOneUID) matchedUser = 1;
   else if (userTwoUID.length() > 0 && uID == userTwoUID) matchedUser = 2;
@@ -732,7 +787,7 @@ void loop() {
   else if (userFourUID.length() > 0 && uID == userFourUID) matchedUser = 4;
 
   if (matchedUser != 0) {
-    delay(1500);
+    delay(1000);
     processTransaction(matchedUser);
   } else {
     Serial.println(F("Error: Card Mismatch"));
@@ -741,7 +796,8 @@ void loop() {
     lcd.print(F("Error: "));
     lcd.setCursor(0, 1);
     lcd.print(F("Card Mismatch"));
-    delay(3000);
+
+    playErrorSound();
   }
 
   Serial.println();
@@ -749,10 +805,6 @@ void loop() {
   rfid.PICC_HaltA();
   rfid.PCD_StopCrypto1();
 
-  deductMode = false;
-  deductAmountEntered = false;
-  amountBufferCents = 0;
-  digitIndex = 0;
-
+  resetAllStates();
   showIdleScreen();
 }
